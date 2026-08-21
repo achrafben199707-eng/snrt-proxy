@@ -1,10 +1,16 @@
 from flask import Flask, redirect, jsonify
 from playwright.sync_api import sync_playwright
+import requests
 import time
 
 app = Flask(__name__)
 
 PLAYER_URL = "https://snrt.player.easybroadcast.io/events/73_almaghribia_83tz85q"
+
+BASE_M3U8 = (
+    "https://cdn.live.easybroadcast.io/"
+    "abr_corp/73_almaghribia_83tz85q/playlist_dvr.m3u8"
+)
 
 cached_url = None
 cached_time = 0
@@ -17,7 +23,7 @@ def get_m3u8():
     if cached_url and time.time() - cached_time < 300:
         return cached_url
 
-    urls = []
+    token_urls = []
 
     with sync_playwright() as p:
         browser = p.chromium.launch(
@@ -25,19 +31,14 @@ def get_m3u8():
             args=["--no-sandbox", "--disable-dev-shm-usage"]
         )
 
-        page = browser.new_page(
-            user_agent=(
-                "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
-                "AppleWebKit/537.36 Chrome/131 Safari/537.36"
-            )
-        )
+        page = browser.new_page()
 
         def capture(response):
             url = response.url
 
-            if ".m3u8" in url:
-                print("M3U8:", url)
-                urls.append(url)
+            if "token.easybroadcast.io" in url:
+                print("Token URL:", url)
+                token_urls.append(url)
 
         page.on("response", capture)
 
@@ -47,23 +48,32 @@ def get_m3u8():
             timeout=30000
         )
 
-        page.wait_for_timeout(8000)
-
+        page.wait_for_timeout(6000)
         browser.close()
 
-    if not urls:
-        raise Exception("Aucun flux M3U8 trouvé")
+    if not token_urls:
+        raise Exception("URL de token EasyBroadcast non trouvée")
 
-    # Priorité au flux 480p que tu utilisais
-    preferred = [
-        url for url in urls
-        if "chunks_dvr.m3u8" in url
-    ]
+    token_url = token_urls[-1]
 
-    final_url = preferred[-1] if preferred else urls[-1]
+    # EasyBroadcast renvoie :
+    # token=XXX&token_path=XXX&expires=XXX
+    response = requests.get(token_url, timeout=15)
+    response.raise_for_status()
+
+    token_data = response.text.strip()
+
+    if "token=" not in token_data:
+        raise Exception(
+            "Réponse token invalide : " + token_data
+        )
+
+    final_url = BASE_M3U8 + "?" + token_data
 
     cached_url = final_url
     cached_time = time.time()
+
+    print("Final M3U8:", final_url)
 
     return final_url
 
@@ -77,18 +87,6 @@ def home():
     """
 
 
-@app.route("/almaghribia.m3u8")
-def almaghribia():
-    try:
-        url = get_m3u8()
-        return redirect(url, code=302)
-
-    except Exception as e:
-        return jsonify({
-            "error": str(e)
-        }), 500
-
-
 @app.route("/debug")
 def debug():
     try:
@@ -100,3 +98,24 @@ def debug():
         return jsonify({
             "error": str(e)
         }), 500
+
+
+@app.route("/almaghribia.m3u8")
+def almaghribia():
+    try:
+        return redirect(
+            get_m3u8(),
+            code=302
+        )
+
+    except Exception as e:
+        return jsonify({
+            "error": str(e)
+        }), 500
+
+
+if __name__ == "__main__":
+    app.run(
+        host="0.0.0.0",
+        port=5000
+    )
