@@ -4,60 +4,72 @@ import time
 
 app = Flask(__name__)
 
-CHANNELS = {
-    "alaoula": "https://snrtlive.ma/fr/al-aoula",
-    "arryadia": "https://snrtlive.ma/fr/arryadia",
-    "assadissa": "https://snrtlive.ma/fr/assadissa",
-    "tamazight": "https://snrtlive.ma/fr/tamazight",
-    "almaghribia": "https://snrtlive.ma/fr/almaghribia",
+PLAYERS = {
+    "alaoula":
+        "https://snrt.player.easybroadcast.io/events/73_aloula_w1dqfwm",
+
+    "arryadia":
+        "https://snrt.player.easybroadcast.io/events/73_arryadia_k2tgcj0",
+
+    "tamazight":
+        "https://snrt.player.easybroadcast.io/events/73_tamazight_tccybxt",
+
+    "almaghribia":
+        "https://snrt.player.easybroadcast.io/events/73_almaghribia_83tz85q",
 }
 
 cache = {}
 CACHE_SECONDS = 120
 
 
-def select_best_stream(urls):
+def choose_stream(urls):
 
+    # On privilégie les vrais flux chunks_dvr
     chunks = [
         u for u in urls
         if "chunks_dvr.m3u8" in u
+        and "cdn.live.easybroadcast.io" in u
     ]
 
-    # 1. Priorité 720p
-    quality_720 = [
+    # Priorité 720p
+    q720 = [
         u for u in chunks
-        if "720p" in u.lower() or "_720_" in u.lower()
+        if "720p" in u.lower()
     ]
 
-    if quality_720:
-        print("720p sélectionné")
-        return quality_720[-1]
+    if q720:
+        return q720[-1]
 
-    # 2. Sinon 480p
-    quality_480 = [
+    # Puis 480p
+    q480 = [
         u for u in chunks
-        if "480p" in u.lower() or "_480_" in u.lower()
+        if "480p" in u.lower()
     ]
 
-    if quality_480:
-        print("720p indisponible -> 480p sélectionné")
-        return quality_480[-1]
+    if q480:
+        return q480[-1]
 
-    # 3. Sinon un autre chunks_dvr
     if chunks:
-        print("Qualité automatique sélectionnée")
         return chunks[-1]
 
-    # 4. Dernier recours
-    if urls:
-        return urls[-1]
+    # Sinon n'importe quel vrai m3u8 CDN
+    cdn = [
+        u for u in urls
+        if (
+            ".m3u8" in u
+            and "cdn.live.easybroadcast.io" in u
+        )
+    ]
 
-    raise Exception("Aucun flux disponible")
+    if cdn:
+        return cdn[-1]
+
+    raise Exception("Aucun flux vidéo trouvé")
 
 
 def get_m3u8(channel):
 
-    if channel not in CHANNELS:
+    if channel not in PLAYERS:
         raise Exception("Chaîne inconnue")
 
     now = time.time()
@@ -66,7 +78,7 @@ def get_m3u8(channel):
         if now - cache[channel]["time"] < CACHE_SECONDS:
             return cache[channel]["url"]
 
-    page_url = CHANNELS[channel]
+    player_url = PLAYERS[channel]
 
     found = []
 
@@ -76,11 +88,12 @@ def get_m3u8(channel):
             headless=True,
             args=[
                 "--no-sandbox",
-                "--disable-dev-shm-usage"
+                "--disable-dev-shm-usage",
+                "--autoplay-policy=no-user-gesture-required"
             ]
         )
 
-        page = browser.new_page(
+        context = browser.new_context(
             user_agent=(
                 "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
                 "AppleWebKit/537.36 "
@@ -89,30 +102,37 @@ def get_m3u8(channel):
             )
         )
 
-        def capture(response):
+        page = context.new_page()
 
-            url = response.url
+        def capture_request(request):
 
-            if (
-                "cdn.live.easybroadcast.io" in url
-                and ".m3u8" in url
-                and "token=" in url
-            ):
-                print(channel, ":", url)
+            url = request.url
+
+            if ".m3u8" in url:
+                print(channel, "M3U8:", url)
 
                 if url not in found:
                     found.append(url)
 
-        page.on("response", capture)
+        page.on("request", capture_request)
+
+        print("Opening:", player_url)
 
         page.goto(
-            page_url,
+            player_url,
             wait_until="domcontentloaded",
             timeout=30000
         )
 
-        # Attend les différentes qualités du player
-        page.wait_for_timeout(10000)
+        # Essaye de démarrer la vidéo
+        try:
+            page.locator("video").evaluate(
+                "v => { v.muted=true; v.play(); }"
+            )
+        except:
+            pass
+
+        page.wait_for_timeout(15000)
 
         browser.close()
 
@@ -121,14 +141,12 @@ def get_m3u8(channel):
             "Aucun M3U8 trouvé pour " + channel
         )
 
-    final_url = select_best_stream(found)
+    final_url = choose_stream(found)
 
     cache[channel] = {
         "url": final_url,
-        "time": now
+        "time": time.time()
     }
-
-    print("Flux final :", final_url)
 
     return final_url
 
@@ -137,14 +155,41 @@ def get_m3u8(channel):
 def home():
 
     return """
-    <h2>SNRT IPTV Proxy</h2>
+    <h2>SNRT Proxy</h2>
 
     <p><a href="/alaoula.m3u8">Al Aoula</a></p>
     <p><a href="/arryadia.m3u8">Arryadia</a></p>
-    <p><a href="/assadissa.m3u8">Assadissa</a></p>
     <p><a href="/tamazight.m3u8">Tamazight</a></p>
     <p><a href="/almaghribia.m3u8">Al Maghribia</a></p>
     """
+
+
+@app.route("/debug/<channel>")
+def debug(channel):
+
+    try:
+
+        url = get_m3u8(channel)
+
+        if "720p" in url.lower():
+            quality = "720p"
+        elif "480p" in url.lower():
+            quality = "480p"
+        else:
+            quality = "auto"
+
+        return jsonify({
+            "channel": channel,
+            "quality": quality,
+            "m3u8": url
+        })
+
+    except Exception as e:
+
+        return jsonify({
+            "channel": channel,
+            "error": str(e)
+        }), 500
 
 
 @app.route("/<channel>.m3u8")
@@ -160,35 +205,6 @@ def stream(channel):
     except Exception as e:
 
         return jsonify({
-            "channel": channel,
-            "error": str(e)
-        }), 500
-
-
-@app.route("/debug/<channel>")
-def debug(channel):
-
-    try:
-
-        url = get_m3u8(channel)
-
-        quality = "unknown"
-
-        if "720p" in url.lower():
-            quality = "720p"
-        elif "480p" in url.lower():
-            quality = "480p"
-
-        return jsonify({
-            "channel": channel,
-            "quality": quality,
-            "m3u8": url
-        })
-
-    except Exception as e:
-
-        return jsonify({
-            "channel": channel,
             "error": str(e)
         }), 500
 
