@@ -24,40 +24,26 @@ CACHE_SECONDS = 120
 
 def choose_stream(urls):
 
-    # On privilégie les vrais flux chunks_dvr
+    # Priorité au flux vidéo réellement chargé
     chunks = [
         u for u in urls
-        if "chunks_dvr.m3u8" in u
-        and "cdn.live.easybroadcast.io" in u
+        if (
+            "chunks_dvr.m3u8" in u
+            and "cdn.live.easybroadcast.io" in u
+            and "token=" in u
+        )
     ]
-
-    # Priorité 720p
-    q720 = [
-        u for u in chunks
-        if "720p" in u.lower()
-    ]
-
-    if q720:
-        return q720[-1]
-
-    # Puis 480p
-    q480 = [
-        u for u in chunks
-        if "480p" in u.lower()
-    ]
-
-    if q480:
-        return q480[-1]
 
     if chunks:
         return chunks[-1]
 
-    # Sinon n'importe quel vrai m3u8 CDN
+    # Sinon n'importe quel flux M3U8 signé du CDN
     cdn = [
         u for u in urls
         if (
             ".m3u8" in u
             and "cdn.live.easybroadcast.io" in u
+            and "token=" in u
         )
     ]
 
@@ -74,6 +60,7 @@ def get_m3u8(channel):
 
     now = time.time()
 
+    # Cache pendant 2 minutes
     if channel in cache:
         if now - cache[channel]["time"] < CACHE_SECONDS:
             return cache[channel]["url"]
@@ -124,14 +111,20 @@ def get_m3u8(channel):
             timeout=30000
         )
 
-        # Essaye de démarrer la vidéo
+        # Essaie de lancer automatiquement la vidéo
         try:
             page.locator("video").evaluate(
-                "v => { v.muted=true; v.play(); }"
+                """
+                v => {
+                    v.muted = true;
+                    v.play();
+                }
+                """
             )
-        except:
+        except Exception:
             pass
 
+        # Attend que le player charge le flux
         page.wait_for_timeout(15000)
 
         browser.close()
@@ -148,6 +141,8 @@ def get_m3u8(channel):
         "time": time.time()
     }
 
+    print(channel, "FINAL:", final_url)
+
     return final_url
 
 
@@ -155,12 +150,23 @@ def get_m3u8(channel):
 def home():
 
     return """
-    <h2>SNRT Proxy</h2>
+    <h2>SNRT IPTV Proxy</h2>
 
-    <p><a href="/alaoula.m3u8">Al Aoula</a></p>
-    <p><a href="/arryadia.m3u8">Arryadia</a></p>
-    <p><a href="/tamazight.m3u8">Tamazight</a></p>
-    <p><a href="/almaghribia.m3u8">Al Maghribia</a></p>
+    <p><a href="/alaoula.m3u8">
+    Al Aoula
+    </a></p>
+
+    <p><a href="/arryadia.m3u8">
+    Arryadia
+    </a></p>
+
+    <p><a href="/tamazight.m3u8">
+    Tamazight
+    </a></p>
+
+    <p><a href="/almaghribia.m3u8">
+    Al Maghribia
+    </a></p>
     """
 
 
@@ -171,16 +177,9 @@ def debug(channel):
 
         url = get_m3u8(channel)
 
-        if "720p" in url.lower():
-            quality = "720p"
-        elif "480p" in url.lower():
-            quality = "480p"
-        else:
-            quality = "auto"
-
         return jsonify({
             "channel": channel,
-            "quality": quality,
+            "quality": "auto",
             "m3u8": url
         })
 
@@ -205,6 +204,7 @@ def stream(channel):
     except Exception as e:
 
         return jsonify({
+            "channel": channel,
             "error": str(e)
         }), 500
 
