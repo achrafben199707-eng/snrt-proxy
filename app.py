@@ -1,34 +1,90 @@
 from flask import Flask, redirect, jsonify
 import requests
 import time
+from urllib.parse import quote
 
 app = Flask(__name__)
 
-STREAM_URL = (
-    "https://cdn.live.easybroadcast.io/"
-    "abr_corp/73_almaghribia_83tz85q/"
-    "corp/73_almaghribia_83tz85q_480p/"
-    "chunks_dvr.m3u8"
-)
 
-TOKEN_URL = (
-    "https://token.easybroadcast.io/all"
-    "?url=https%3A%2F%2Fcdn.live.easybroadcast.io%2F"
-    "abr_corp%2F73_almaghribia_83tz85q%2F"
-    "corp%2F73_almaghribia_83tz85q_480p%2F"
-    "chunks_dvr.m3u8"
-)
+# ============================================================
+# CHAÎNES SNRT
+# ============================================================
 
-cached_url = None
-cached_time = 0
+CHANNELS = {
+
+    "almaghribia": {
+        "id": "73_almaghribia_83tz85q",
+        "quality": "480p"
+    },
+
+    "alaoula": {
+        "id": "73_aloula_w1dqfwm",
+        "quality": "480p"
+    },
+
+    "arryadia": {
+        "id": "73_arryadia_k2tgcj0",
+        "quality": "480p"
+    },
+
+    "tamazight": {
+        "id": "73_tamazight_tccybxt",
+        "quality": "480p"
+    }
+}
 
 
-def get_stream():
-    global cached_url, cached_time
+# ============================================================
+# CACHE
+# ============================================================
 
-    # Nouveau token toutes les 2 minutes
-    if cached_url and time.time() - cached_time < 120:
-        return cached_url
+cache = {}
+
+CACHE_SECONDS = 120
+
+
+# ============================================================
+# CONSTRUCTION URL STREAM
+# ============================================================
+
+def build_stream_url(channel):
+
+    info = CHANNELS[channel]
+
+    channel_id = info["id"]
+    quality = info["quality"]
+
+    return (
+        "https://cdn.live.easybroadcast.io/"
+        f"abr_corp/{channel_id}/"
+        f"corp/{channel_id}_{quality}/"
+        "chunks_dvr.m3u8"
+    )
+
+
+# ============================================================
+# RÉCUPÉRATION TOKEN
+# ============================================================
+
+def get_stream(channel):
+
+    if channel not in CHANNELS:
+        raise Exception("Chaîne inconnue")
+
+    now = time.time()
+
+    # Cache pendant 2 minutes
+    if channel in cache:
+
+        if now - cache[channel]["time"] < CACHE_SECONDS:
+            return cache[channel]["url"]
+
+    stream_url = build_stream_url(channel)
+
+    token_url = (
+        "https://token.easybroadcast.io/all"
+        "?url=" + quote(stream_url, safe="")
+    )
 
     headers = {
         "User-Agent": "Mozilla/5.0",
@@ -36,7 +92,7 @@ def get_stream():
     }
 
     r = requests.get(
-        TOKEN_URL,
+        token_url,
         headers=headers,
         timeout=15
     )
@@ -46,54 +102,110 @@ def get_stream():
     token_data = r.text.strip()
 
     if "token=" not in token_data:
+
         raise Exception(
-            "Réponse EasyBroadcast invalide : " + token_data
+            "Réponse EasyBroadcast invalide : "
+            + token_data
         )
 
-    final_url = STREAM_URL + "?" + token_data
+    final_url = stream_url + "?" + token_data
 
-    cached_url = final_url
-    cached_time = time.time()
+    cache[channel] = {
+        "url": final_url,
+        "time": time.time()
+    }
 
-    print("STREAM:", final_url)
+    print(channel, ":", final_url)
 
     return final_url
 
 
+# ============================================================
+# PAGE PRINCIPALE
+# ============================================================
+
 @app.route("/")
 def home():
+
     return """
-    <h2>SNRT Al Maghribia</h2>
-    <p><a href="/almaghribia.m3u8">Ouvrir le flux</a></p>
+    <h2>SNRT Live</h2>
+
+    <p>
+    <a href="/almaghribia.m3u8">
+    Al Maghribia
+    </a>
+    </p>
+
+    <p>
+    <a href="/alaoula.m3u8">
+    Al Aoula
+    </a>
+    </p>
+
+    <p>
+    <a href="/arryadia.m3u8">
+    Arryadia
+    </a>
+    </p>
+
+    <p>
+    <a href="/tamazight.m3u8">
+    Tamazight
+    </a>
+    </p>
     """
 
 
-@app.route("/debug")
-def debug():
+# ============================================================
+# DEBUG
+# ============================================================
+
+@app.route("/debug/<channel>")
+def debug(channel):
+
     try:
+
         return jsonify({
-            "m3u8": get_stream()
+            "channel": channel,
+            "m3u8": get_stream(channel)
         })
+
     except Exception as e:
+
         return jsonify({
+            "channel": channel,
             "error": str(e)
         }), 500
 
 
-@app.route("/almaghribia.m3u8")
-def stream():
+# ============================================================
+# STREAM
+# ============================================================
+
+@app.route("/<channel>.m3u8")
+def stream(channel):
+
     try:
+
         return redirect(
-            get_stream(),
+            get_stream(channel),
             code=302
         )
+
     except Exception as e:
+
         return jsonify({
+            "channel": channel,
             "error": str(e)
         }), 500
 
 
+# ============================================================
+# START
+# ============================================================
+
 if __name__ == "__main__":
+
     app.run(
         host="0.0.0.0",
         port=5000
