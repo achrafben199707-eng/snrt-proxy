@@ -1,210 +1,149 @@
 from flask import Flask, redirect, jsonify
 from playwright.sync_api import sync_playwright
+import requests
 import time
 
 app = Flask(__name__)
 
-PLAYERS = {
-    "alaoula":
-        "https://snrt.player.easybroadcast.io/events/73_aloula_w1dqfwm",
+PLAYER_URL = "https://snrt.player.easybroadcast.io/events/73_almaghribia_83tz85q"
 
-    "arryadia":
-        "https://snrt.player.easybroadcast.io/events/73_arryadia_k2tgcj0",
+BASE_M3U8 = (
+STREAM_URL = (
+    "https://cdn.live.easybroadcast.io/"
+    "abr_corp/73_almaghribia_83tz85q/playlist_dvr.m3u8"
+    "abr_corp/73_almaghribia_83tz85q/"
+    "corp/73_almaghribia_83tz85q_480p/"
+    "chunks_dvr.m3u8"
+)
 
-    "tamazight":
-        "https://snrt.player.easybroadcast.io/events/73_tamazight_tccybxt",
+TOKEN_URL = (
+    "https://token.easybroadcast.io/all"
+    "?url=https%3A%2F%2Fcdn.live.easybroadcast.io%2F"
+    "abr_corp%2F73_almaghribia_83tz85q%2F"
+    "corp%2F73_almaghribia_83tz85q_480p%2F"
+    "chunks_dvr.m3u8"
+)
 
-    "almaghribia":
-        "https://snrt.player.easybroadcast.io/events/73_almaghribia_83tz85q",
-}
-
-cache = {}
-CACHE_SECONDS = 120
-
-
-def choose_stream(urls):
-
-    # Priorité au flux vidéo réellement chargé
-    chunks = [
-        u for u in urls
-        if (
-            "chunks_dvr.m3u8" in u
-            and "cdn.live.easybroadcast.io" in u
-            and "token=" in u
-        )
-    ]
-
-    if chunks:
-        return chunks[-1]
-
-    # Sinon n'importe quel flux M3U8 signé du CDN
-    cdn = [
-        u for u in urls
-        if (
-            ".m3u8" in u
-            and "cdn.live.easybroadcast.io" in u
-            and "token=" in u
-        )
-    ]
-
-    if cdn:
-        return cdn[-1]
-
-    raise Exception("Aucun flux vidéo trouvé")
+cached_url = None
+cached_time = 0
 
 
-def get_m3u8(channel):
+def get_m3u8():
+def get_stream():
+    global cached_url, cached_time
 
-    if channel not in PLAYERS:
-        raise Exception("Chaîne inconnue")
+    # Cache 5 minutes
+    if cached_url and time.time() - cached_time < 300:
+    # Nouveau token toutes les 2 minutes
+    if cached_url and time.time() - cached_time < 120:
+        return cached_url
 
-    now = time.time()
-
-    # Cache pendant 2 minutes
-    if channel in cache:
-        if now - cache[channel]["time"] < CACHE_SECONDS:
-            return cache[channel]["url"]
-
-    player_url = PLAYERS[channel]
-
-    found = []
+    token_urls = []
 
     with sync_playwright() as p:
-
         browser = p.chromium.launch(
             headless=True,
-            args=[
-                "--no-sandbox",
-                "--disable-dev-shm-usage",
-                "--autoplay-policy=no-user-gesture-required"
-            ]
+            args=["--no-sandbox", "--disable-dev-shm-usage"]
         )
 
-        context = browser.new_context(
-            user_agent=(
-                "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
-                "AppleWebKit/537.36 "
-                "(KHTML, like Gecko) "
-                "Chrome/131 Safari/537.36"
-            )
-        )
+        page = browser.new_page()
 
-        page = context.new_page()
+        def capture(response):
+            url = response.url
 
-        def capture_request(request):
+            if "token.easybroadcast.io" in url:
+                print("Token URL:", url)
+                token_urls.append(url)
+    headers = {
+        "User-Agent": "Mozilla/5.0",
+        "Referer": "https://snrtlive.ma/"
+    }
 
-            url = request.url
-
-            if ".m3u8" in url:
-                print(channel, "M3U8:", url)
-
-                if url not in found:
-                    found.append(url)
-
-        page.on("request", capture_request)
-
-        print("Opening:", player_url)
+        page.on("response", capture)
 
         page.goto(
-            player_url,
+            PLAYER_URL,
             wait_until="domcontentloaded",
             timeout=30000
         )
 
-        # Essaie de lancer automatiquement la vidéo
-        try:
-            page.locator("video").evaluate(
-                """
-                v => {
-                    v.muted = true;
-                    v.play();
-                }
-                """
-            )
-        except Exception:
-            pass
-
-        # Attend que le player charge le flux
-        page.wait_for_timeout(15000)
-
+        page.wait_for_timeout(6000)
         browser.close()
 
-    if not found:
+    if not token_urls:
+        raise Exception("URL de token EasyBroadcast non trouvée")
+
+    token_url = token_urls[-1]
+    r = requests.get(
+        TOKEN_URL,
+        headers=headers,
+        timeout=15
+    )
+
+    # EasyBroadcast renvoie :
+    # token=XXX&token_path=XXX&expires=XXX
+    response = requests.get(token_url, timeout=15)
+    response.raise_for_status()
+    r.raise_for_status()
+
+    token_data = response.text.strip()
+    token_data = r.text.strip()
+
+    if "token=" not in token_data:
         raise Exception(
-            "Aucun M3U8 trouvé pour " + channel
+            "Réponse token invalide : " + token_data
+            "Réponse EasyBroadcast invalide : " + token_data
         )
 
-    final_url = choose_stream(found)
+    final_url = BASE_M3U8 + "?" + token_data
+    final_url = STREAM_URL + "?" + token_data
 
-    cache[channel] = {
-        "url": final_url,
-        "time": time.time()
-    }
+    cached_url = final_url
+    cached_time = time.time()
 
-    print(channel, "FINAL:", final_url)
+    print("Final M3U8:", final_url)
+    print("STREAM:", final_url)
 
     return final_url
 
 
 @app.route("/")
 def home():
-
     return """
-    <h2>SNRT IPTV Proxy</h2>
-
-    <p><a href="/alaoula.m3u8">
-    Al Aoula
-    </a></p>
-
-    <p><a href="/arryadia.m3u8">
-    Arryadia
-    </a></p>
-
-    <p><a href="/tamazight.m3u8">
-    Tamazight
-    </a></p>
-
-    <p><a href="/almaghribia.m3u8">
-    Al Maghribia
-    </a></p>
+    <h2>SNRT Proxy</h2>
+    <p>Al Maghribia</p>
+    <a href="/almaghribia.m3u8">Flux IPTV</a>
+    <h2>SNRT Al Maghribia</h2>
+    <p><a href="/almaghribia.m3u8">Ouvrir le flux</a></p>
     """
 
 
-@app.route("/debug/<channel>")
-def debug(channel):
-
+@app.route("/debug")
+def debug():
     try:
-
-        url = get_m3u8(channel)
-
         return jsonify({
-            "channel": channel,
-            "quality": "auto",
-            "m3u8": url
+            "m3u8": get_m3u8()
+            "m3u8": get_stream()
         })
 
     except Exception as e:
-
         return jsonify({
-            "channel": channel,
             "error": str(e)
         }), 500
 
 
-@app.route("/<channel>.m3u8")
-def stream(channel):
-
+@app.route("/almaghribia.m3u8")
+def almaghribia():
+def stream():
     try:
-
         return redirect(
-            get_m3u8(channel),
+            get_m3u8(),
+            get_stream(),
             code=302
         )
 
     except Exception as e:
-
         return jsonify({
-            "channel": channel,
             "error": str(e)
         }), 500
 
