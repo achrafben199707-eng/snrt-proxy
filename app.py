@@ -1,128 +1,135 @@
-from flask import Flask, redirect, jsonify
-from playwright.sync_api import sync_playwright
+from flask import Flask, Response, request, jsonify
 import requests
+from urllib.parse import urljoin, quote
 import time
 
 app = Flask(__name__)
 
-PLAYER_URL = (
-    "https://snrt.player.easybroadcast.io/"
-    "events/73_almaghribia_83tz85q"
-)
-
-BASE_M3U8 = (
+BASE = (
     "https://cdn.live.easybroadcast.io/"
     "abr_corp/73_almaghribia_83tz85q/"
-    "playlist_dvr.m3u8"
 )
 
-cached_url = None
+MASTER = BASE + "playlist_dvr.m3u8"
+
+TOKEN_API = (
+    "https://token.easybroadcast.io/all"
+    "?url="
+    + quote(MASTER, safe="")
+)
+
+cached_token = None
 cached_time = 0
 
 
-def get_m3u8():
-    global cached_url, cached_time
+def get_token():
+    global cached_token, cached_time
 
-    # Renouvellement toutes les 2 minutes
-    if cached_url and time.time() - cached_time < 120:
-        return cached_url
-
-    token_urls = []
-
-    with sync_playwright() as p:
-        browser = p.chromium.launch(
-            headless=True,
-            args=[
-                "--no-sandbox",
-                "--disable-dev-shm-usage"
-            ]
-        )
-
-        page = browser.new_page()
-
-        def capture(response):
-            url = response.url
-
-            if "token.easybroadcast.io" in url:
-                print("TOKEN URL:", url)
-                token_urls.append(url)
-
-        page.on("response", capture)
-
-        page.goto(
-            PLAYER_URL,
-            wait_until="domcontentloaded",
-            timeout=30000
-        )
-
-        page.wait_for_timeout(7000)
-
-        browser.close()
-
-    if not token_urls:
-        raise Exception(
-            "Impossible de récupérer le token EasyBroadcast"
-        )
-
-    # Prend l'appel de token correspondant au master
-    master_tokens = [
-        u for u in token_urls
-        if "playlist_dvr.m3u8" in u
-    ]
-
-    if master_tokens:
-        token_url = master_tokens[-1]
-    else:
-        token_url = token_urls[-1]
+    # Renouvelle toutes les 2 minutes
+    if cached_token and time.time() - cached_time < 120:
+        return cached_token
 
     headers = {
         "User-Agent": "Mozilla/5.0",
-        "Referer": PLAYER_URL
+        "Referer": "https://snrtlive.ma/"
     }
 
     r = requests.get(
-        token_url,
+        TOKEN_API,
         headers=headers,
         timeout=15
     )
 
     r.raise_for_status()
 
-    token_data = r.text.strip()
+    data = r.text.strip()
 
-    if "token=" not in token_data:
+    if "token=" not in data:
         raise Exception(
-            "Token EasyBroadcast invalide : " + token_data
+            "Token EasyBroadcast invalide : " + data
         )
 
-    final_url = BASE_M3U8 + "?" + token_data
-
-    cached_url = final_url
+    cached_token = data
     cached_time = time.time()
 
-    print("FINAL:", final_url)
+    return data
 
-    return final_url
+
+def signed_url(url):
+    token = get_token()
+
+    sep = "&" if "?" in url else "?"
+
+    return url + sep + token
+
+
+def rewrite_playlist(text, original_url):
+    lines = []
+
+    for line in text.splitlines():
+
+        # Commentaires HLS
+        if line.startswith("#"):
+            lines.append(line)
+            continue
+
+        # Ligne vide
+        if not line.strip():
+            lines.append(line)
+            continue
+
+        absolute = urljoin(original_url, line.strip())
+
+        proxy_url = (
+            "/proxy?url="
+            + quote(absolute, safe="")
+        )
+
+        lines.append(proxy_url)
+
+    return "\n".join(lines)
 
 
 @app.route("/")
 def home():
     return """
-    <h2>Al Maghribia</h2>
+    <h2>SNRT Al Maghribia Proxy</h2>
     <p>
         <a href="/almaghribia.m3u8">
-            Ouvrir Al Maghribia
+            Al Maghribia
         </a>
     </p>
     """
 
 
-@app.route("/debug")
-def debug():
+@app.route("/almaghribia.m3u8")
+def almaghribia():
+
     try:
-        return jsonify({
-            "m3u8": get_m3u8()
-        })
+        url = signed_url(MASTER)
+
+        headers = {
+            "User-Agent": "Mozilla/5.0",
+            "Referer": "https://snrtlive.ma/"
+        }
+
+        r = requests.get(
+            url,
+            headers=headers,
+            timeout=20
+        )
+
+        r.raise_for_status()
+
+        playlist = rewrite_playlist(
+            r.text,
+            MASTER
+        )
+
+        return Response(
+            playlist,
+            content_type="application/vnd.apple.mpegurl"
+        )
 
     except Exception as e:
         return jsonify({
@@ -130,14 +137,67 @@ def debug():
         }), 500
 
 
-@app.route("/almaghribia.m3u8")
-def stream():
+@app.route("/proxy")
+def proxy():
+
+    target = request.args.get("url")
+
+    if not target:
+        return "URL manquante", 400
+
     try:
-        return redirect(
-            get_m3u8(),
-            code=302
+        url = signed_url(target)
+
+        headers = {
+            "User-Agent": "Mozilla/5.0",
+            "Referer": "https://snrtlive.ma/"
+        }
+
+        r = requests.get(
+            url,
+            headers=headers,
+            timeout=30,
+            stream=True
         )
 
+        r.raise_for_status()
+
+        content_type = r.headers.get(
+            "Content-Type",
+            "application/octet-stream"
+        )
+
+        # Si c'est encore une playlist M3U8
+        if ".m3u8" in target:
+            playlist = rewrite_playlist(
+                r.text,
+                target
+            )
+
+            return Response(
+                playlist,
+                content_type="application/vnd.apple.mpegurl"
+            )
+
+        # Sinon segment vidéo/audio
+        return Response(
+            r.iter_content(chunk_size=64 * 1024),
+            content_type=content_type
+        )
+
+    except Exception as e:
+        return jsonify({
+            "error": str(e)
+        }), 500
+
+
+@app.route("/debug")
+def debug():
+    try:
+        return jsonify({
+            "master": MASTER,
+            "token": get_token()
+        })
     except Exception as e:
         return jsonify({
             "error": str(e)
